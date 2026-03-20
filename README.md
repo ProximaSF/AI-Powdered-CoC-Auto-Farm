@@ -2,6 +2,7 @@
 
 All vib coded
 
+Yeh no, still takes too much resources to upgrade walls. Mind as well get banned atp. 
 ---
 
 ## Requirements
