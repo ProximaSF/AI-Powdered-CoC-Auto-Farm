@@ -1,0 +1,5 @@
+{
+    "min_gold":        {"amount": 500000, "active": true},
+    "min_elixir":      {"amount": 500000, "active": true},
+    "min_dark_elixir": {"amount": 5000,   "active": false}
+}

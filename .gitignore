@@ -2,3 +2,5 @@ __pycache__
 .venv
 .env
 image
+.claude
+army_strategies/__pycache__

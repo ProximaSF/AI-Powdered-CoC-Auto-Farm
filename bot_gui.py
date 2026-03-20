@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog
 import os
+import json
 from PIL import Image
 from pynput import keyboard as pynput_keyboard
 
@@ -8,9 +9,16 @@ from bot_logic import CoCFarmBot
 
 from analyze_screenshot import analyze_screenshot_with_bedrock
 
-SAMPLE_IMAGE_DIR      = "image/sample"
+SAMPLE_IMAGE_DIR = "image/sample"
+GLOBAL_CONFIG    = "global.json"
 
-class BotGUI:
+def _load_global():
+    with open(GLOBAL_CONFIG, "r") as f:
+        return json.load(f)
+
+_globals = _load_global()
+
+class BotGUI():
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("CoC Farm Bot")
@@ -76,6 +84,29 @@ class BotGUI:
         # Auto-load first sample image if folder exists
         self._auto_load_sample()
 
+        # ── Army selection ───────────────────────────────
+        army_frame = ttk.LabelFrame(self.root, text="Army")
+        army_frame.pack(fill="x", padx=10, pady=4)
+
+        ttk.Label(army_frame, text="Select army:").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+
+        self.army_var = tk.StringVar()
+        self.army_combo = ttk.Combobox(
+            army_frame, textvariable=self.army_var,
+            state="readonly", width=20, font=("Segoe UI", 10)
+        )
+        self.army_combo.grid(row=0, column=1, padx=8, pady=6, sticky="w")
+        self.army_combo.bind("<<ComboboxSelected>>", self._on_army_selected)
+
+        refresh_btn = tk.Button(
+            army_frame, text="↺", command=self._refresh_armies,
+            bg="#313244", fg="#cdd6f4", font=("Segoe UI", 9),
+            relief="flat", cursor="hand2"
+        )
+        refresh_btn.grid(row=0, column=2, padx=4, pady=6)
+
+        self._refresh_armies()
+
         # ── Resource thresholds ──────────────────────────
         thresh_frame = ttk.LabelFrame(self.root, text="Resource Thresholds")
         thresh_frame.pack(fill="x", padx=10, pady=4)
@@ -93,9 +124,9 @@ class BotGUI:
         self.thresh_entries  = {}
 
         resources = [
-            ("Gold",        "500000", True),
-            ("Elixir",      "500000", True),
-            ("Dark Elixir", "3000",   True),
+            ("Gold",        str(_globals["min_gold"]["amount"]),        _globals["min_gold"]["active"]),
+            ("Elixir",      str(_globals["min_elixir"]["amount"]),      _globals["min_elixir"]["active"]),
+            ("Dark Elixir", str(_globals["min_dark_elixir"]["amount"]), _globals["min_dark_elixir"]["active"]),
         ]
 
         for row, (label, default, checked) in enumerate(resources, start=1):
@@ -156,6 +187,37 @@ class BotGUI:
             relief="flat", cursor="hand2"
         )
         clear_btn.pack(anchor="e", padx=4, pady=(0, 4))
+
+    # ── Army helpers ──────────────────────────
+    def _refresh_armies(self):
+        """Scan army_strategies/ for army_*.json files and update the dropdown."""
+        try:
+            files = os.listdir("army_strategies")
+            armies = sorted(
+                os.path.splitext(f)[0]
+                for f in files
+                if f.endswith(".json")
+                and f.startswith("army_")
+                and not f.startswith("ai_")
+                and "_reorder" not in f
+            )
+        except Exception:
+            armies = []
+
+        self.army_combo["values"] = armies
+        if armies:
+            current = self.army_var.get()
+            if current not in armies:
+                self.army_var.set(armies[0])
+                self.bot.update_army(armies[0])
+        else:
+            self.army_var.set("")
+            self._log("[WARN] No army keys found in config.")
+
+    def _on_army_selected(self, _event=None):
+        key = self.army_var.get()
+        self.bot.update_army(key)
+        self._log(f"Army selected: {key}")
 
     # ── Test mode helpers ─────────────────────
     def _auto_load_sample(self):

@@ -38,7 +38,7 @@ def analyze_screenshot_with_bedrock(screenshot: Image.Image) -> dict:
     prompt = (
         "You are analyzing a Clash of Clans screenshot of an opponent's base "
         "during the matchmaking/scouting screen. "
-        "Extract the available loot: Gold, Elixir, and Dark Elixir (if visible). "
+        "Extract the available loot: Gold, Elixir, and Dark Elixir (if visible, should be on the left side somewhere)."
         "Return ONLY a JSON object with keys: gold, elixir, dark_elixir (integers, 0 if not visible). "
         'Example: {"gold": 1500000, "elixir": 1200000, "dark_elixir": 8000}'
     )
