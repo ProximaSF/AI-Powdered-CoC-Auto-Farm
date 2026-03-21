@@ -1,5 +1,10 @@
 {
-    "min_gold":        {"amount": 500000, "active": true},
-    "min_elixir":      {"amount": 500000, "active": true},
-    "min_dark_elixir": {"amount": 5000,   "active": false}
+    "min_gold":          {"amount": 500000,  "active": true},
+    "min_elixir":        {"amount": 500000,  "active": true},
+    "min_combined_loot": {"amount": 1000000, "active": true},
+    "min_dark_elixir":   {"amount": 5000,    "active": false},
+
+    "surrender_check_after":    30,
+    "surrender_check_interval": 3,
+    "surrender_threshold":      0.20
 }

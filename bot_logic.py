@@ -2,6 +2,7 @@ import json
 import math
 import time
 import os
+import glob
 import threading
 import importlib
 import numpy as np
@@ -12,7 +13,7 @@ from pynput.keyboard import Controller as KeyboardController
 
 _keyboard = KeyboardController()
 
-from analyze_screenshot import analyze_screenshot_with_bedrock
+from analyze_screenshot import analyze_screenshot_with_bedrock, analyze_screenshot_with_ocr
 
 SCREENSHOT_REGION  = None   # None = full screen, or (x, y, w, h)
 COORDS_FILE        = "coc_button_coords.json"
@@ -20,8 +21,9 @@ GLOBAL_CONFIG      = "global.json"
 RETURN_HOME_IMAGE     = "image/detect_image/return_home_button.png"
 FIND_NEXT_BATTLE_IMAGE = "image/detect_image/find_next_battle.png"
 BATTLE_DURATION    = 180    # seconds
+AIR_DEFENCE_GLOB = "image/detect_image/air_defences_*.png"
 
-IGNORE_BOUNDRY = ["1043,1435", "1498,1420"] # rectangle to prevent troop placement over troop menu
+IGNORE_BOUNDRY = ["1481,1443", "851,1417"] # rectangle to prevent troop placement over troop menu
 
 
 
@@ -41,6 +43,9 @@ def _load_coords():
         "final_attack":            parse(data["home_to_battle"]["final_attack_button"]),
         "next_battle":             parse(data["next_battle"]["next_battle_button"]),
         "return_home_from_battle": parse(data["return_home_from_battle"]["return_home_button"]),
+        "surrender":               parse(data["surrender"]["surrender_button"]),
+        "surrender_next":          parse(data["surrender"]["next_button"]),
+        "surrender_home":          parse(data["surrender"]["return_home_button"]),
         "diamond": [
             parse(diamond["left"]),
             parse(diamond["top"]),
@@ -142,6 +147,51 @@ def _inward_points(diamond, num_points, inward=250):
     return result
 
 
+def _find_all_template_matches(screenshot, template_path, threshold=0.75):
+    """Find all non-overlapping instances of template in screenshot.
+    Returns list of (x, y) center screen coordinates."""
+    needle = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+    if needle is None:
+        return []
+    h, w = needle.shape
+    result = cv2.matchTemplate(
+        cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY),
+        needle,
+        cv2.TM_CCOEFF_NORMED,
+    )
+    centers = []
+    while True:
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val < threshold:
+            break
+        cx = max_loc[0] + w // 2
+        cy = max_loc[1] + h // 2
+        centers.append((cx, cy))
+        # Suppress region around this match to avoid duplicates
+        x1 = max(0, max_loc[0] - w // 2)
+        y1 = max(0, max_loc[1] - h // 2)
+        x2 = min(result.shape[1], max_loc[0] + w * 3 // 2)
+        y2 = min(result.shape[0], max_loc[1] + h * 3 // 2)
+        result[y1:y2, x1:x2] = 0.0
+    return centers
+
+
+def _find_air_defences(screenshot, threshold=0.65, dedup_dist=60):
+    """Search all air defence templates and return deduplicated
+    list of (x, y) center coordinates for each air defence found."""
+    raw = []
+    for path in sorted(glob.glob(AIR_DEFENCE_GLOB)):
+        raw.extend(_find_all_template_matches(screenshot, path, threshold))
+
+    # Deduplicate: if two hits are within dedup_dist pixels, keep only one
+    unique = []
+    for cx, cy in raw:
+        if not any(abs(cx - ux) < dedup_dist and abs(cy - uy) < dedup_dist
+                   for ux, uy in unique):
+            unique.append((cx, cy))
+    return unique
+
+
 class CoCFarmBot:
     def __init__(self, log_callback, status_callback):
         self.running      = False
@@ -157,8 +207,12 @@ class CoCFarmBot:
         self.check_elixir      = _g["min_elixir"]["active"]
         self.check_dark_elixir = _g["min_dark_elixir"]["active"]
 
+        self.min_combined_loot   = _g["min_combined_loot"]["amount"]
+        self.check_combined      = _g["min_combined_loot"]["active"]
+
         self.test_mode       = False
         self.test_image_path = None
+        self.use_ocr         = True   # default: fast OCR, no AI
 
         self.selected_army   = "army_1"
         self._next_battled   = False
@@ -187,14 +241,16 @@ class CoCFarmBot:
     def update_army(self, army_key: str):
         self.selected_army = army_key
 
-    def update_thresholds(self, gold, elixir, dark_elixir,
-                          check_gold, check_elixir, check_dark_elixir):
-        self.min_gold        = gold
-        self.min_elixir      = elixir
-        self.min_dark_elixir = dark_elixir
-        self.check_gold        = check_gold
-        self.check_elixir      = check_elixir
-        self.check_dark_elixir = check_dark_elixir
+    def update_thresholds(self, gold, elixir, dark_elixir, combined_loot,
+                          check_gold, check_elixir, check_dark_elixir, check_combined):
+        self.min_gold            = gold
+        self.min_elixir          = elixir
+        self.min_dark_elixir     = dark_elixir
+        self.min_combined_loot   = combined_loot
+        self.check_gold          = check_gold
+        self.check_elixir        = check_elixir
+        self.check_dark_elixir   = check_dark_elixir
+        self.check_combined      = check_combined
 
     def _loop(self):
         self.log("Bot started.")
@@ -246,8 +302,12 @@ class CoCFarmBot:
             os.makedirs("image/ai_screenshot", exist_ok=True)
             screenshot.save("image/ai_screenshot/latest.png")
 
-        self.log("Analyzing resources with Bedrock AI...")
-        resources   = analyze_screenshot_with_bedrock(screenshot)
+        if self.use_ocr:
+            self.log("Analyzing resources with OCR...")
+            resources = analyze_screenshot_with_ocr(screenshot)
+        else:
+            self.log("Analyzing resources with Bedrock AI...")
+            resources = analyze_screenshot_with_bedrock(screenshot)
         gold        = resources.get("gold", 0)
         elixir      = resources.get("elixir", 0)
         dark_elixir = resources.get("dark_elixir", 0)
@@ -258,33 +318,67 @@ class CoCFarmBot:
         if self.check_dark_elixir: parts.append(f"Dark Elixir: {dark_elixir:,}")
         self.log("Detected → " + "  |  ".join(parts) if parts else "Detected → (no resources selected)")
 
-        results = []
-        if self.check_gold:
-            ok = gold >= self.min_gold
-            results.append(ok)
-            self.log(f"  Gold:        {gold:,} / {self.min_gold:,}  {'✅' if ok else '❌'}")
-        if self.check_elixir:
-            ok = elixir >= self.min_elixir
-            results.append(ok)
-            self.log(f"  Elixir:      {elixir:,} / {self.min_elixir:,}  {'✅' if ok else '❌'}")
+        # ── Dark Elixir: hard independent gate ──────────────────────────────
+        dark_ok = (not self.check_dark_elixir) or (dark_elixir >= self.min_dark_elixir)
         if self.check_dark_elixir:
-            ok = dark_elixir >= self.min_dark_elixir
-            results.append(ok)
-            self.log(f"  Dark Elixir: {dark_elixir:,} / {self.min_dark_elixir:,}  {'✅' if ok else '❌'}")
+            self.log(f"  Dark Elixir: {dark_elixir:,} / {self.min_dark_elixir:,}  {'✅' if dark_ok else '❌ (required)'}")
 
-        if not results:
+        # ── Gold / Elixir: individual AND combined OR ────────────────────────
+        loot_checks_active = self.check_gold or self.check_elixir or self.check_combined
+
+        if self.check_gold:
+            ind_gold_ok = gold >= self.min_gold
+            self.log(f"  Gold:        {gold:,} / {self.min_gold:,}  {'✅' if ind_gold_ok else '❌'}")
+        else:
+            ind_gold_ok = True
+
+        if self.check_elixir:
+            ind_elixir_ok = elixir >= self.min_elixir
+            self.log(f"  Elixir:      {elixir:,} / {self.min_elixir:,}  {'✅' if ind_elixir_ok else '❌'}")
+        else:
+            ind_elixir_ok = True
+
+        # individual_ok: both active individual checks passed
+        individual_ok = (ind_gold_ok and ind_elixir_ok) if (self.check_gold or self.check_elixir) else False
+
+        # combined_ok: gold+elixir sum meets threshold
+        combined_ok = False
+        if self.check_combined:
+            combined_sum = gold + elixir
+            combined_ok = combined_sum >= self.min_combined_loot
+            self.log(f"  Total G+E:   {combined_sum:,} / {self.min_combined_loot:,}  {'✅' if combined_ok else '❌'}")
+
+        loot_ok = individual_ok or combined_ok
+
+        if not loot_checks_active and not self.check_dark_elixir:
             self.log("[WARN] No resources selected to check — skipping base.")
-            self._next_base(coords)
-            return
-
-        if not all(results):
-            self.log("Below threshold. Moving to next battle...")
             self._next_base(coords)
             if self.test_mode:
                 self.log("\n[TEST] Single-cycle test complete. Bot stopped.")
                 self.running = False
                 self.set_status("Stopped")
             return
+
+        if not dark_ok:
+            self.log(f"Dark Elixir required but not met ({dark_elixir:,} / {self.min_dark_elixir:,}). Skipping...")
+            self._next_base(coords)
+            if self.test_mode:
+                self.log("\n[TEST] Single-cycle test complete. Bot stopped.")
+                self.running = False
+                self.set_status("Stopped")
+            return
+
+        if loot_checks_active and not loot_ok:
+            self.log("Loot below threshold. Moving to next battle...")
+            self._next_base(coords)
+            if self.test_mode:
+                self.log("\n[TEST] Single-cycle test complete. Bot stopped.")
+                self.running = False
+                self.set_status("Stopped")
+            return
+
+        # Save original loot for early-surrender check during battle
+        self._attack_resources = resources
 
         # Thresholds met — attack
         # Use reorder variant if troops were reshuffled by a previous "Next Battle"
@@ -299,7 +393,7 @@ class CoCFarmBot:
         army = _load_army(army_key)
         self._deploy_army(coords["diamond"], army)
 
-        self._wait_for_battle_end(coords)
+        self._wait_for_battle_end(coords, self._attack_resources)
         self._next_battled = False  # troops retrain after battle, order resets
 
         if self.running and not self.test_mode:
@@ -313,6 +407,13 @@ class CoCFarmBot:
             self.set_status("Stopped")
 
     def _deploy_army(self, diamond, army):
+        # Click the center of the deployment area to give the emulator keyboard focus.
+        # With no troop type selected yet this click deploys nothing in CoC.
+        cx = sum(p[0] for p in diamond) // 4
+        cy = sum(p[1] for p in diamond) // 4
+        pyautogui.click(cx, cy)
+        time.sleep(0.3)
+
         try:
             strategy = importlib.import_module(f"army_strategies.{self.selected_army}")
         except ModuleNotFoundError:
@@ -328,6 +429,9 @@ class CoCFarmBot:
             time.sleep(0.05)
 
     def _press_key(self, key):
+        if len(key) != 1:
+            self.log(f"[WARN] Invalid hotkey '{key}' — rename army entry to include single-char key suffix (e.g., dragon_1:)")
+            return
         _keyboard.press(key)
         _keyboard.release(key)
         time.sleep(0.2)
@@ -347,23 +451,64 @@ class CoCFarmBot:
             time.sleep(poll)
         return False
 
-    def _wait_for_battle_end(self, coords):
+    def _wait_for_battle_end(self, coords, original_resources: dict):
+        _cfg = json.load(open(GLOBAL_CONFIG))
+        check_after    = _cfg.get("surrender_check_after",    30)
+        check_interval = _cfg.get("surrender_check_interval", 3)
+        threshold      = _cfg.get("surrender_threshold",      0.25)
+
         self.log(f"[BATTLE] Waiting up to {BATTLE_DURATION}s for battle to end...")
-        deadline = time.time() + BATTLE_DURATION
+        self.log(f"[BATTLE] Surrender check after {check_after}s, every {check_interval}s, threshold {threshold*100:.0f}%")
+        start_time = time.time()
+        deadline = start_time + BATTLE_DURATION
         needle = cv2.imread(RETURN_HOME_IMAGE, cv2.IMREAD_GRAYSCALE)
+        last_loot_check = start_time  # so first check triggers after check_after seconds
 
         while time.time() < deadline and self.running:
+            now = time.time()
+            elapsed = now - start_time
+
             screenshot = self._take_screenshot()
             os.makedirs("image/ai_screenshot", exist_ok=True)
             screenshot.save("image/ai_screenshot/latest.png")
 
+            # ── Early surrender check ────────────────────────────────────────
+            if elapsed >= check_after and \
+               now - last_loot_check >= check_interval:
+                last_loot_check = now
+                try:
+                    current = analyze_screenshot_with_ocr(screenshot) if self.use_ocr \
+                              else analyze_screenshot_with_bedrock(screenshot)
+                    triggers = []
+                    if self.check_gold and original_resources.get("gold", 0) > 0:
+                        ratio = current.get("gold", 0) / original_resources["gold"]
+                        if ratio < threshold:
+                            triggers.append(f"Gold {ratio*100:.0f}%")
+                    if self.check_elixir and original_resources.get("elixir", 0) > 0:
+                        ratio = current.get("elixir", 0) / original_resources["elixir"]
+                        if ratio < threshold:
+                            triggers.append(f"Elixir {ratio*100:.0f}%")
+                    if self.check_dark_elixir and original_resources.get("dark_elixir", 0) > 0:
+                        ratio = current.get("dark_elixir", 0) / original_resources["dark_elixir"]
+                        if ratio < threshold:
+                            triggers.append(f"Dark Elixir {ratio*100:.0f}%")
+
+                    if triggers:
+                        self.log(f"[BATTLE] Loot below {threshold*100:.0f}% ({', '.join(triggers)}). Surrendering early...")
+                        self._surrender(coords)
+                        return
+                    else:
+                        self.log(f"[BATTLE] Loot check OK at {elapsed:.0f}s — continuing.")
+                except Exception as e:
+                    self.log(f"[BATTLE] Loot check error: {e}")
+
+            # ── Check for natural battle end ─────────────────────────────────
             haystack = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY)
             result = cv2.matchTemplate(haystack, needle, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, _ = cv2.minMaxLoc(result)
-            self.log(f"[BATTLE] Return home match score: {max_val:.2f}")
 
             if max_val >= 0.8:
-                self.log("[BATTLE] Return home button detected early! Clicking...")
+                self.log("[BATTLE] Return home button detected. Clicking...")
                 self._click(coords["return_home_from_battle"])
                 time.sleep(1)
                 return
@@ -374,6 +519,15 @@ class CoCFarmBot:
             self.log("[BATTLE] 3 minutes elapsed. Clicking return home...")
             self._click(coords["return_home_from_battle"])
             time.sleep(1)
+
+    def _surrender(self, coords):
+        """Click through the CoC surrender flow and return home."""
+        self._click(coords["surrender"])
+        time.sleep(1)
+        self._click(coords["surrender_next"])
+        time.sleep(1)
+        self._click(coords["surrender_home"])
+        time.sleep(1)
 
     def _take_screenshot(self) -> Image.Image:
         if SCREENSHOT_REGION:

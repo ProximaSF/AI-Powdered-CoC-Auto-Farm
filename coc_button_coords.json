@@ -1,12 +1,10 @@
 {
     "troop_deployment_outer_diamond_bountry": {
-        "left": "205,758",
-        "top": "1240,1",
-        "right": "2294,755",
-        "bottom": "1237,1589"
+        "left": "186,768",
+        "top": "1275,0",
+        "right": "2345,784",
+        "bottom": "1281,1545"
     },
-
-    
 
     "home_to_battle": {
         "attack_button":"135,1460",
@@ -15,7 +13,7 @@
     },
 
     "next_battle": {
-        "next_battle_button":"2324, 1311"
+        "next_battle_button":"2324,1311"
     },
 
     "return_home": {
@@ -24,6 +22,11 @@
 
     "return_home_from_battle": {
         "return_home_button":"1233,1346"
-    }
+    },
 
+    "surrender": {
+        "surrender_button":"177,1351",
+        "next_button":"1572,994",
+        "return_home_button":"1233,1346"
+    }
 }

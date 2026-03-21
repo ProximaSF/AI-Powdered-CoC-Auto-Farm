@@ -7,8 +7,6 @@ from pynput import keyboard as pynput_keyboard
 
 from bot_logic import CoCFarmBot
 
-from analyze_screenshot import analyze_screenshot_with_bedrock
-
 SAMPLE_IMAGE_DIR = "image/sample"
 GLOBAL_CONFIG    = "global.json"
 
@@ -124,9 +122,10 @@ class BotGUI():
         self.thresh_entries  = {}
 
         resources = [
-            ("Gold",        str(_globals["min_gold"]["amount"]),        _globals["min_gold"]["active"]),
-            ("Elixir",      str(_globals["min_elixir"]["amount"]),      _globals["min_elixir"]["active"]),
-            ("Dark Elixir", str(_globals["min_dark_elixir"]["amount"]), _globals["min_dark_elixir"]["active"]),
+            ("Gold",        str(_globals["min_gold"]["amount"]),          _globals["min_gold"]["active"]),
+            ("Elixir",      str(_globals["min_elixir"]["amount"]),        _globals["min_elixir"]["active"]),
+            ("Total G+E",   str(_globals["min_combined_loot"]["amount"]), _globals["min_combined_loot"]["active"]),
+            ("Dark Elixir*",str(_globals["min_dark_elixir"]["amount"]),   _globals["min_dark_elixir"]["active"]),
         ]
 
         for row, (label, default, checked) in enumerate(resources, start=1):
@@ -144,13 +143,46 @@ class BotGUI():
             entry.grid(row=row, column=2, padx=8, pady=4)
             self.thresh_entries[label] = val_var
 
+        ttk.Label(thresh_frame, text="* Dark Elixir is always checked individually",
+                  foreground="#6c7086", font=("Segoe UI", 8)).grid(
+            row=len(resources)+1, column=0, columnspan=3, sticky="w", padx=8)
+
         apply_btn = tk.Button(
             thresh_frame, text="Apply Thresholds", command=self._apply_thresholds,
             bg="#89b4fa", fg="#1e1e2e", font=("Segoe UI", 9, "bold"),
             relief="flat", cursor="hand2"
         )
-        apply_btn.grid(row=len(resources)+1, column=0, columnspan=3,
+        apply_btn.grid(row=len(resources)+2, column=0, columnspan=3,
                        pady=6, padx=8, sticky="ew")
+
+        # ── Loot detection method ────────────────────────
+        detect_frame = ttk.LabelFrame(self.root, text="Loot Detection")
+        detect_frame.pack(fill="x", padx=10, pady=4)
+
+        self.use_ocr_var = tk.BooleanVar(value=True)   # OCR is the default
+
+        ocr_rb = tk.Radiobutton(
+            detect_frame, text="OCR  (fast, no AI)",
+            variable=self.use_ocr_var, value=True,
+            command=self._on_detection_toggle,
+            bg="#1e1e2e", fg="#cdd6f4", selectcolor="#313244",
+            activebackground="#1e1e2e", activeforeground="#cdd6f4",
+            font=("Segoe UI", 10),
+        )
+        ocr_rb.grid(row=0, column=0, sticky="w", padx=12, pady=4)
+
+        ai_rb = tk.Radiobutton(
+            detect_frame, text="AI  (Bedrock Nova)",
+            variable=self.use_ocr_var, value=False,
+            command=self._on_detection_toggle,
+            bg="#1e1e2e", fg="#cdd6f4", selectcolor="#313244",
+            activebackground="#1e1e2e", activeforeground="#cdd6f4",
+            font=("Segoe UI", 10),
+        )
+        ai_rb.grid(row=0, column=1, sticky="w", padx=12, pady=4)
+
+        # Apply default to bot
+        self.bot.use_ocr = True
 
         # ── Start / Stop buttons ─────────────────────────
         btn_frame = ttk.Frame(self.root)
@@ -247,6 +279,12 @@ class BotGUI():
             self.test_path_var.set(os.path.basename(path))
             self._log(f"Test image set: {os.path.basename(path)}")
 
+    def _on_detection_toggle(self):
+        use_ocr = self.use_ocr_var.get()
+        self.bot.use_ocr = use_ocr
+        method = "OCR" if use_ocr else "Bedrock AI"
+        self._log(f"Loot detection method: {method}")
+
     def _on_resource_toggle(self):
         active = [k for k, v in self.resource_checks.items() if v.get()]
         self._log(f"Checking resources: {', '.join(active) if active else 'none'}")
@@ -265,6 +303,7 @@ class BotGUI():
     def _start(self):
         self._apply_thresholds()
         self.bot.test_mode = self.test_mode_var.get()
+        self.bot.use_ocr   = self.use_ocr_var.get()
         self.bot.start()
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
@@ -282,14 +321,16 @@ class BotGUI():
 
     def _apply_thresholds(self):
         try:
-            gold  = int(self.thresh_entries["Gold"].get().replace(",", ""))
-            elixir = int(self.thresh_entries["Elixir"].get().replace(",", ""))
-            dark  = int(self.thresh_entries["Dark Elixir"].get().replace(",", ""))
+            gold     = int(self.thresh_entries["Gold"].get().replace(",", ""))
+            elixir   = int(self.thresh_entries["Elixir"].get().replace(",", ""))
+            combined = int(self.thresh_entries["Total G+E"].get().replace(",", ""))
+            dark     = int(self.thresh_entries["Dark Elixir*"].get().replace(",", ""))
             self.bot.update_thresholds(
-                gold, elixir, dark,
+                gold, elixir, dark, combined,
                 check_gold        = self.resource_checks["Gold"].get(),
                 check_elixir      = self.resource_checks["Elixir"].get(),
-                check_dark_elixir = self.resource_checks["Dark Elixir"].get(),
+                check_dark_elixir = self.resource_checks["Dark Elixir*"].get(),
+                check_combined    = self.resource_checks["Total G+E"].get(),
             )
             active = [k for k, v in self.resource_checks.items() if v.get()]
             self._log(f"Thresholds applied. Checking: {', '.join(active) if active else 'none'}")

@@ -10,6 +10,10 @@ deploy(bot, diamond, army) is the entry point called by bot_logic.
 import time
 import pyautogui
 
+from bot_logic import _perimeter_points, _inward_points, _find_air_defences
+
+SPELLS_PER_AIR_DEF = 3
+
 
 def deploy(bot, diamond, army):
     troops        = [(n, d) for n, d in army.items() if d["category"] == "troop"]
@@ -18,17 +22,42 @@ def deploy(bot, diamond, army):
     heroes        = [(n, d) for n, d in army.items() if d["category"] == "hero"]
     spells        = [(n, d) for n, d in army.items() if d["category"] == "spell"]
 
-    from bot_logic import _perimeter_points, _inward_points
-
     # 1. First two troop types evenly around border
     for name, data in troops[:2]:
         bot.log(f"[DEPLOY] {name} x{data['count']} around border")
         bot._place_wave(data["key"], _perimeter_points(diamond, data["count"]))
 
-    # 2. Spells inward (closer to center)
+    # 2. Spells: 3 per air defence, remaining inward
     for name, data in spells:
-        bot.log(f"[DEPLOY] {name} x{data['count']} (inward)")
-        bot._place_wave(data["key"], _inward_points(diamond, data["count"]))
+        spell_key   = data["key"]
+        total       = data["count"]
+        used        = 0
+
+        # Take fresh screenshot and search all air defence templates
+        screenshot  = pyautogui.screenshot()
+        ad_locs     = _find_air_defences(screenshot)
+
+        bot._press_key(spell_key)   # select spell type once
+
+        if ad_locs:
+            bot.log(f"[DEPLOY] {name}: {len(ad_locs)} air defence(s) — placing up to {SPELLS_PER_AIR_DEF} spells each")
+            for loc in ad_locs:
+                to_place = min(SPELLS_PER_AIR_DEF, total - used)
+                if to_place <= 0:
+                    break
+                for _ in range(to_place):
+                    pyautogui.click(*loc)
+                    time.sleep(0.2)
+                    used += 1
+        else:
+            bot.log(f"[DEPLOY] {name}: no air defences detected")
+
+        remaining = total - used
+        if remaining > 0:
+            bot.log(f"[DEPLOY] {name} x{remaining} remaining → inward")
+            for x, y in _inward_points(diamond, remaining):
+                pyautogui.click(x, y)
+                time.sleep(0.1)
 
     # 4. Heroes — diamond order: [left, top, right, bottom]
     #    AQ + Warden + wall breakers → left corner

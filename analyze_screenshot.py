@@ -3,10 +3,52 @@ import json
 import base64
 import io
 import boto3
+import numpy as np
+import pytesseract
 from PIL import Image
 from pynput import keyboard as pynput_keyboard
 from dotenv import load_dotenv
 load_dotenv()
+
+pytesseract.pytesseract.tesseract_cmd = r"C:/Program Files/Tesseract-OCR/tesseract.exe"
+
+# Boundary from user-defined 4-click region around "Available Loot"
+# Click1:(45,139) Click2:(360,135) Click3:(34,401) Click4:(319,400)
+_RESOURCE_BOUNDS = (34, 135, 360, 401)
+_ICON_WIDTH      = 60   # pixels to skip on left (resource icon)
+_ROW_TOP         = 45   # pixels to skip at top ("Available Loot:" title)
+_OCR_CONFIG      = "--psm 7 -c tessedit_char_whitelist=0123456789"
+
+
+def _preprocess_row(row_img: Image.Image) -> Image.Image:
+    """Isolate bright (white/cream) number pixels for cleaner OCR."""
+    arr = np.array(row_img.convert("RGB"))
+    mask = arr.mean(axis=2) > 160
+    result = np.zeros_like(arr)
+    result[mask] = 255
+    return Image.fromarray(result.astype(np.uint8)).convert("L")
+
+
+def analyze_screenshot_with_ocr(screenshot: Image.Image) -> dict:
+    """
+    Extract loot values from a CoC scout screenshot using OCR on a
+    fixed coordinate region — no AI or network call required.
+    Returns: {"gold": int, "elixir": int, "dark_elixir": int}
+    """
+    x1, y1, x2, y2 = _RESOURCE_BOUNDS
+    crop = screenshot.crop((x1, y1, x2, y2))
+    crop_w, crop_h = crop.size
+
+    row_h = (crop_h - _ROW_TOP) // 3
+    result = {}
+    for i, name in enumerate(("gold", "elixir", "dark_elixir")):
+        ry1 = _ROW_TOP + i * row_h
+        ry2 = _ROW_TOP + (i + 1) * row_h
+        row = crop.crop((_ICON_WIDTH, ry1, crop_w, ry2))
+        raw = pytesseract.image_to_string(_preprocess_row(row), config=_OCR_CONFIG).strip()
+        result[name] = int(raw) if raw.isdigit() else 0
+
+    return result
 
 AWS_ACCESS_KEY_ID     = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
