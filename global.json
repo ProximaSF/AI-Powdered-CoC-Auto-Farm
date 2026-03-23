@@ -6,5 +6,10 @@
 
     "surrender_check_after":    30,
     "surrender_check_interval": 3,
-    "surrender_threshold":      0.20
+    "surrender_threshold":      0.20,
+
+    "max_user_gold_resource_storage": 19000000,
+    "max_user_elixir_resource_storage": 19000000,
+    "max_user_dark_elixir_resource_storage": 310000
+
 }

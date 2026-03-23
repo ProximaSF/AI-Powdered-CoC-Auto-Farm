@@ -13,7 +13,10 @@ from pynput.keyboard import Controller as KeyboardController
 
 _keyboard = KeyboardController()
 
-from analyze_screenshot import analyze_screenshot_with_bedrock, analyze_screenshot_with_ocr
+from analyze_screenshot import (analyze_screenshot_with_bedrock, analyze_screenshot_with_ocr,
+                                 analyze_user_resources_with_ai, validate_storage_full_with_ai,
+                                 read_looted_resources_ocr)
+from discord_notify import webhook_embed
 
 SCREENSHOT_REGION  = None   # None = full screen, or (x, y, w, h)
 COORDS_FILE        = "coc_button_coords.json"
@@ -37,6 +40,18 @@ def _load_coords():
 
     diamond = data["troop_deployment_outer_diamond_bountry"]
 
+    opp = data["opponent_resource_boundry"]
+    otl = parse(opp["top_left"])
+    obr = parse(opp["bottom_right"])
+
+    ur = data["user_resource_boundry"]
+    tl = parse(ur["top_left"])
+    br = parse(ur["bottom_right"])
+
+    lr = data["resource_looted_boundry"]
+    ltl = parse(lr["top_left"])
+    lbr = parse(lr["bottom_right"])
+
     return {
         "attack":                  parse(data["home_to_battle"]["attack_button"]),
         "find_match":              parse(data["home_to_battle"]["find_a_match_button"]),
@@ -46,6 +61,9 @@ def _load_coords():
         "surrender":               parse(data["surrender"]["surrender_button"]),
         "surrender_next":          parse(data["surrender"]["next_button"]),
         "surrender_home":          parse(data["surrender"]["return_home_button"]),
+        "opponent_resource_bounds": (otl[0], otl[1], obr[0], obr[1]),
+        "user_resource_bounds":    (tl[0], tl[1], br[0], br[1]),
+        "looted_resource_bounds":  (ltl[0], ltl[1], lbr[0], lbr[1]),
         "diamond": [
             parse(diamond["left"]),
             parse(diamond["top"]),
@@ -210,12 +228,21 @@ class CoCFarmBot:
         self.min_combined_loot   = _g["min_combined_loot"]["amount"]
         self.check_combined      = _g["min_combined_loot"]["active"]
 
+        self.max_gold_storage        = _g.get("max_user_gold_resource_storage", 0)
+        self.max_elixir_storage      = _g.get("max_user_elixir_resource_storage", 0)
+        self.max_dark_elixir_storage = _g.get("max_user_dark_elixir_resource_storage", 0)
+
         self.test_mode       = False
         self.test_image_path = None
         self.use_ocr         = True   # default: fast OCR, no AI
 
         self.selected_army   = "army_1"
         self._next_battled   = False
+
+        # Running resource counters (set at startup, incremented after each battle)
+        self._user_gold        = 0
+        self._user_elixir      = 0
+        self._user_dark_elixir = 0
 
         self._thread = None
 
@@ -262,6 +289,54 @@ class CoCFarmBot:
             return
 
         if not self.test_mode:
+            # Send startup Discord ping to confirm webhook is working
+            try:
+                webhook_embed("CoC Farm Bot — Started", "Bot has started farming.")
+                self.log("[DISCORD] Startup notification sent.")
+            except Exception as ex:
+                self.log(f"[DISCORD] Startup notification failed: {ex}")
+
+            self.log("[STORAGE] Reading starting resources with AI...")
+            self.log(f"[STORAGE] Max limits — Gold: {self.max_gold_storage:,}  "
+                     f"Elixir: {self.max_elixir_storage:,}  "
+                     f"Dark Elixir: {self.max_dark_elixir_storage:,}")
+            try:
+                start_ss = self._take_screenshot()
+                start_res = analyze_user_resources_with_ai(start_ss, coords["user_resource_bounds"])
+                self._user_gold        = start_res.get("gold", 0)
+                self._user_elixir      = start_res.get("elixir", 0)
+                self._user_dark_elixir = start_res.get("dark_elixir", 0)
+                self.log(f"[STORAGE] Starting — Gold: {self._user_gold:,}  "
+                         f"Elixir: {self._user_elixir:,}  "
+                         f"Dark Elixir: {self._user_dark_elixir:,}")
+
+                # Check if already full before doing a single battle.
+                # Only consider resources that are selected in the GUI.
+                # Stop only when ALL selected resources are full.
+                already_full = []
+                if self.check_gold and self.max_gold_storage > 0 and self._user_gold >= self.max_gold_storage:
+                    already_full.append("Gold")
+                if self.check_elixir and self.max_elixir_storage > 0 and self._user_elixir >= self.max_elixir_storage:
+                    already_full.append("Elixir")
+                if self.check_dark_elixir and self.max_dark_elixir_storage > 0 and self._user_dark_elixir >= self.max_dark_elixir_storage:
+                    already_full.append("Dark Elixir")
+
+                selected_count = sum([self.check_gold, self.check_elixir, self.check_dark_elixir])
+                if already_full:
+                    self.log(f"[STORAGE] Full at startup: {', '.join(already_full)} "
+                             f"({len(already_full)}/{selected_count} selected resources)")
+                if already_full and len(already_full) >= selected_count:
+                    msg = "All selected storage full at startup: " + ", ".join(already_full)
+                    self.log(f"[STORAGE FULL] {msg}. Not starting battles.")
+                    try:
+                        webhook_embed("CoC Farm Bot — Storage Full", msg)
+                    except Exception as ex:
+                        self.log(f"[DISCORD] Notification failed: {ex}")
+                    self.stop()
+                    return
+            except Exception as ex:
+                self.log(f"[STORAGE] Could not read starting resources: {ex}")
+
             self._navigate_to_battle(coords)
 
         cycle = 0
@@ -304,10 +379,10 @@ class CoCFarmBot:
 
         if self.use_ocr:
             self.log("Analyzing resources with OCR...")
-            resources = analyze_screenshot_with_ocr(screenshot)
+            resources = analyze_screenshot_with_ocr(screenshot, coords["opponent_resource_bounds"])
         else:
             self.log("Analyzing resources with Bedrock AI...")
-            resources = analyze_screenshot_with_bedrock(screenshot)
+            resources = analyze_screenshot_with_bedrock(screenshot, coords["opponent_resource_bounds"])
         gold        = resources.get("gold", 0)
         elixir      = resources.get("elixir", 0)
         dark_elixir = resources.get("dark_elixir", 0)
@@ -393,11 +468,14 @@ class CoCFarmBot:
         army = _load_army(army_key)
         self._deploy_army(coords["diamond"], army)
 
-        self._wait_for_battle_end(coords, self._attack_resources)
+        storage_full = self._wait_for_battle_end(coords, self._attack_resources)
         self._next_battled = False  # troops retrain after battle, order resets
 
         if self.running and not self.test_mode:
-            self.log("Returning to home village and searching for next base...")
+            if storage_full:
+                self.stop()
+                return
+            self.log("Searching for next base...")
             time.sleep(1)
             self._navigate_to_battle(coords)
 
@@ -423,10 +501,15 @@ class CoCFarmBot:
         strategy.deploy(self, diamond, army)
 
     def _place_wave(self, key, points):
+        import random
         self._press_key(key)
         for x, y in points:
-            pyautogui.click(x, y)
-            time.sleep(0.05)
+            # Small position jitter ±4px so clicks aren't pixel-perfect
+            jx = x + random.randint(-4, 4)
+            jy = y + random.randint(-4, 4)
+            pyautogui.click(jx, jy)
+            # Human-like variable delay between troop placements
+            time.sleep(random.uniform(0.08, 0.32))
 
     def _press_key(self, key):
         if len(key) != 1:
@@ -477,8 +560,8 @@ class CoCFarmBot:
                now - last_loot_check >= check_interval:
                 last_loot_check = now
                 try:
-                    current = analyze_screenshot_with_ocr(screenshot) if self.use_ocr \
-                              else analyze_screenshot_with_bedrock(screenshot)
+                    current = analyze_screenshot_with_ocr(screenshot, coords["opponent_resource_bounds"]) if self.use_ocr \
+                              else analyze_screenshot_with_bedrock(screenshot, coords["opponent_resource_bounds"])
                     triggers = []
                     if self.check_gold and original_resources.get("gold", 0) > 0:
                         ratio = current.get("gold", 0) / original_resources["gold"]
@@ -495,8 +578,7 @@ class CoCFarmBot:
 
                     if triggers:
                         self.log(f"[BATTLE] Loot below {threshold*100:.0f}% ({', '.join(triggers)}). Surrendering early...")
-                        self._surrender(coords)
-                        return
+                        return self._surrender(coords)
                     else:
                         self.log(f"[BATTLE] Loot check OK at {elapsed:.0f}s — continuing.")
                 except Exception as e:
@@ -508,26 +590,99 @@ class CoCFarmBot:
             _, max_val, _, _ = cv2.minMaxLoc(result)
 
             if max_val >= 0.8:
-                self.log("[BATTLE] Return home button detected. Clicking...")
+                self.log("[BATTLE] Return home button detected. Reading loot...")
+                full = self._read_and_track_loot(coords, delay=0)
                 self._click(coords["return_home_from_battle"])
                 time.sleep(1)
-                return
+                return full
 
             time.sleep(1)
 
         if self.running:
-            self.log("[BATTLE] 3 minutes elapsed. Clicking return home...")
+            self.log("[BATTLE] 3 minutes elapsed. Reading loot and returning home...")
+            full = self._read_and_track_loot(coords, delay=0)
             self._click(coords["return_home_from_battle"])
             time.sleep(1)
+            return full
+        return False
 
-    def _surrender(self, coords):
-        """Click through the CoC surrender flow and return home."""
+    def _read_and_track_loot(self, coords, delay: float = 2.0) -> bool:
+        """OCR the post-battle loot popup, add to running counters, and check if storage
+        is full via AI. Returns True if AI confirms storage is full."""
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            ss = self._take_screenshot()
+            looted = read_looted_resources_ocr(ss, coords["looted_resource_bounds"])
+        except Exception as e:
+            self.log(f"[LOOT] OCR error: {e}")
+            return False
+
+        lg  = looted.get("gold", 0)
+        le  = looted.get("elixir", 0)
+        lde = looted.get("dark_elixir", 0)
+        self.log(f"[LOOT] Looted this battle — Gold: {lg:,}  Elixir: {le:,}  Dark Elixir: {lde:,}")
+
+        self._user_gold        += lg
+        self._user_elixir      += le
+        self._user_dark_elixir += lde
+        self.log(f"[STORAGE] Running total — Gold: {self._user_gold:,}  "
+                 f"Elixir: {self._user_elixir:,}  "
+                 f"Dark Elixir: {self._user_dark_elixir:,}")
+
+        gold_full   = self.check_gold        and self.max_gold_storage > 0        and self._user_gold        >= self.max_gold_storage
+        elixir_full = self.check_elixir      and self.max_elixir_storage > 0      and self._user_elixir      >= self.max_elixir_storage
+        de_full     = self.check_dark_elixir and self.max_dark_elixir_storage > 0 and self._user_dark_elixir >= self.max_dark_elixir_storage
+
+        selected_count = sum([self.check_gold, self.check_elixir, self.check_dark_elixir])
+        full_selected  = sum([gold_full, elixir_full, de_full])
+
+        if full_selected > 0:
+            partial = ([" Gold"] if gold_full else []) + (["Elixir"] if elixir_full else []) + (["Dark Elixir"] if de_full else [])
+            self.log(f"[STORAGE] Full so far: {', '.join(partial)} ({full_selected}/{selected_count} selected resources)")
+
+        # Only trigger AI validation when ALL selected resources are full
+        if full_selected < selected_count:
+            return False
+
+        suspects = ([" Gold"] if gold_full else []) + (["Elixir"] if elixir_full else []) + (["Dark Elixir"] if de_full else [])
+        self.log(f"[STORAGE] Counter suggests {', '.join(suspects)} may be full — asking AI to validate...")
+
+        try:
+            home_ss    = self._take_screenshot()
+            validation = validate_storage_full_with_ai(home_ss, coords["user_resource_bounds"])
+        except Exception as e:
+            self.log(f"[STORAGE] AI validation error: {e}")
+            return False
+
+        confirmed = []
+        if gold_full   and validation.get("gold_full"):        confirmed.append("Gold")
+        if elixir_full and validation.get("elixir_full"):      confirmed.append("Elixir")
+        if de_full     and validation.get("dark_elixir_full"): confirmed.append("Dark Elixir")
+
+        if confirmed:
+            msg = "Storage full: " + ", ".join(confirmed)
+            self.log(f"[STORAGE FULL] AI confirmed — {msg}. Stopping bot.")
+            try:
+                webhook_embed("CoC Farm Bot — Storage Full", msg)
+            except Exception as e:
+                self.log(f"[DISCORD] Notification failed: {e}")
+            return True
+
+        self.log("[STORAGE] AI says storage not full yet — continuing.")
+        return False
+
+    def _surrender(self, coords) -> bool:
+        """Click surrender, read loot popup, then return home.
+        Returns True if AI confirms storage is full."""
         self._click(coords["surrender"])
         time.sleep(1)
         self._click(coords["surrender_next"])
-        time.sleep(1)
+        # Loot popup appears after next_button — read it (delay built into _read_and_track_loot)
+        full = self._read_and_track_loot(coords)
         self._click(coords["surrender_home"])
         time.sleep(1)
+        return full
 
     def _take_screenshot(self) -> Image.Image:
         if SCREENSHOT_REGION:

@@ -6,6 +6,7 @@ from PIL import Image
 from pynput import keyboard as pynput_keyboard
 
 from bot_logic import CoCFarmBot
+from discord_notify import DiscordLogger
 
 SAMPLE_IMAGE_DIR = "image/sample"
 GLOBAL_CONFIG    = "global.json"
@@ -32,6 +33,8 @@ class BotGUI():
         style.configure("TLabelframe.Label", background="#1e1e2e", foreground="#89b4fa", font=("Segoe UI", 10, "bold"))
         style.configure("TEntry",      fieldbackground="#313244", foreground="#cdd6f4")
         style.map("TCheckbutton", background=[("active", "#1e1e2e")])
+
+        self._discord_logger = DiscordLogger(os.getenv("DISCORD_LOG_WEBHOOK_URL", ""))
 
         self.bot = CoCFarmBot(
             log_callback=self._log,
@@ -339,6 +342,7 @@ class BotGUI():
 
     # ── Helpers ───────────────────────────────
     def _log(self, msg: str):
+        self._discord_logger.log(msg)
         def _write():
             self.log_box.config(state="normal")
             self.log_box.insert("end", msg + "\n")

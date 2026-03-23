@@ -6,6 +6,26 @@
         "bottom": "1281,1545"
     },
 
+    "opponent_resource_boundry": {
+        "top_left": "34, 135",
+        "bottom_right": "360, 401"
+    },
+
+    "user_resource_boundry": {
+        "top_left": "2039, 30",
+        "top_right": "2537, 24",
+        "bottom_left": "2040, 386",
+        "bottom_right": "2541, 387"
+    },
+
+    "resource_looted_boundry": {
+        "top_left": "880, 660",
+        "top_right": "1316, 657",
+        "bottom_left": "880, 943",
+        "bottom_right": "1316, 946"
+    },
+
+
     "home_to_battle": {
         "attack_button":"135,1460",
         "find_a_match_button": "478,1152",

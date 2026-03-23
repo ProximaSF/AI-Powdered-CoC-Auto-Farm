@@ -8,6 +8,7 @@ deploy(bot, diamond, army) is the entry point called by bot_logic.
   army    – dict from _load_army(): {name: {key, count, category}}
 """
 import time
+import random
 import pyautogui
 
 from bot_logic import _perimeter_points, _inward_points, _find_air_defences
@@ -22,12 +23,7 @@ def deploy(bot, diamond, army):
     heroes        = [(n, d) for n, d in army.items() if d["category"] == "hero"]
     spells        = [(n, d) for n, d in army.items() if d["category"] == "spell"]
 
-    # 1. First two troop types evenly around border
-    for name, data in troops[:2]:
-        bot.log(f"[DEPLOY] {name} x{data['count']} around border")
-        bot._place_wave(data["key"], _perimeter_points(diamond, data["count"]))
-
-    # 2. Spells: 3 per air defence, remaining inward
+    # 1. Spells: 2 per air defence, remaining inward
     for name, data in spells:
         spell_key   = data["key"]
         total       = data["count"]
@@ -46,9 +42,15 @@ def deploy(bot, diamond, army):
                 if to_place <= 0:
                     break
                 for _ in range(to_place):
-                    pyautogui.click(*loc)
-                    time.sleep(0.2)
+                    # Small jitter so spells don't land on the exact same pixel
+                    jx = loc[0] + random.randint(-6, 6)
+                    jy = loc[1] + random.randint(-6, 6)
+                    pyautogui.click(jx, jy)
+                    # Variable cast speed — feels like a human tapping
+                    time.sleep(random.uniform(0.2, 0.6))
                     used += 1
+                # Pause between air defences (1–2.5s, like moving the finger)
+                time.sleep(random.uniform(1.0, 2.5))
         else:
             bot.log(f"[DEPLOY] {name}: no air defences detected")
 
@@ -58,6 +60,12 @@ def deploy(bot, diamond, army):
             for x, y in _inward_points(diamond, remaining):
                 pyautogui.click(x, y)
                 time.sleep(0.1)
+
+    
+    # 3. First two troop types evenly around border
+    for name, data in troops[:2]:
+        bot.log(f"[DEPLOY] {name} x{data['count']} around border")
+        bot._place_wave(data["key"], _perimeter_points(diamond, data["count"]))
 
     # 4. Heroes — diamond order: [left, top, right, bottom]
     #    AQ + Warden + wall breakers → left corner
@@ -95,7 +103,7 @@ def deploy(bot, diamond, army):
             pyautogui.click(*hero_spot)
             time.sleep(0.15)
 
-    available_corners = [diamond[1], diamond[2]]  # top, right
+    available_corners = [diamond[0], diamond[1]]  # top, right
     for i, (name, data) in enumerate(other_heroes):
         if i >= len(available_corners):
             break
